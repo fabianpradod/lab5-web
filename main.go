@@ -1,37 +1,114 @@
 package main
 
 import (
+	"bufio"
 	"database/sql"
 	"fmt"
+	"log"
+	"net"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
 
 func main() {
-	db, _ := sql.Open("sqlite", "file:tv-shows.db")
+	db, err := sql.Open("sqlite", "file:tv-shows.db")
+	if err != nil {
+		log.Fatal(err)
+	}
 	defer db.Close()
 
-	db.Exec("CREATE TABLE IF NOT EXISTS shows (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT UNIQUE, current_episode TEXT)")
+	db.Exec("CREATE TABLE IF NOT EXISTS shows (title TEXT PRIMARY KEY, current_episode TEXT)")
 
-	shows := [][2]string{
-		{"Breaking Bad", "S01E01"},
-		{"The Office", "S02E03"},
-		{"Stranger Things", "S01E02"},
+	shows := [][]string{
+		{"A Knight of the Seven Kingdoms", "S01E05"},
+		{"Bojack Horseman", "S06E15"},
 	}
 
 	for _, s := range shows {
-		db.Exec("INSERT INTO shows (title, current_episode) VALUES (?, ?)", s[0], s[1])
+		db.Exec("INSERT OR IGNORE INTO shows (title, current_episode) VALUES (?, ?)", s[0], s[1])
 	}
 
-	var id int
-	var title string
-	var current_episode string
-
-	query, _ := db.Query("SELECT id, title, current_episode FROM shows ORDER BY id")
-	defer query.Close()
-
-	for query.Next() {
-		query.Scan(&id, &title, &current_episode)
-		fmt.Printf("%d: %s (%s)\n", id, title, current_episode)
+	listener, err := net.Listen("tcp", ":8080")
+	if err != nil {
+		log.Fatal(err)
 	}
+	defer listener.Close()
+
+	log.Print("listening to port 8080")
+
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			continue
+		}
+		go handle(conn, db)
+	}
+}
+
+func handle(conn net.Conn, db *sql.DB) {
+	defer conn.Close()
+
+	reader := bufio.NewReader(conn)
+
+	requestLine, err := reader.ReadString('\n')
+	if err != nil {
+		return
+	}
+
+	parts := strings.Fields(requestLine)
+	if len(parts) < 2 {
+		return
+	}
+
+	path := parts[1]
+
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return
+		}
+		if line == "\r\n" {
+			break
+		}
+	}
+
+	var body string
+	if path == "/shows" {
+		rows, err := db.Query("SELECT title, current_episode FROM shows ORDER BY title")
+		if err != nil {
+			body = "<html><body><h1>Error querying</h1></body></html>"
+		} else {
+			defer rows.Close()
+			var b strings.Builder
+			b.WriteString("<html><body><h1>Shows</h1><table border=\"1\" cellpadding=\"6\" cellspacing=\"0\">")
+			b.WriteString("<tr><th>Title</th><th>Current Episode</th></tr>")
+
+			for rows.Next() {
+				var title, ep string
+				if err := rows.Scan(&title, &ep); err != nil {
+					continue
+				}
+				b.WriteString(fmt.Sprintf("<tr><td>%s</td><td>%s</td></tr>", title, ep))
+			}
+
+			b.WriteString("</table></body></html>")
+			body = b.String()
+		}
+	} else {
+		body = "<html><body><h1>SQLite Shows Server</h1><p>Visit <a href=\"/shows\">/shows</a></p></body></html>"
+	}
+
+	resp := fmt.Sprintf(
+		"HTTP/1.1 200 OK\r\n"+
+			"Content-Type: text/html; charset=utf-8\r\n"+
+			"Content-Length: %d\r\n"+
+			"Connection: close\r\n"+
+			"\r\n"+
+			"%s",
+		len(body),
+		body,
+	)
+
+	conn.Write([]byte(resp))
 }
