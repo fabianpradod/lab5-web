@@ -93,6 +93,7 @@ func handle(conn net.Conn, db *sql.DB) {
 			}
 
 			b.WriteString("</table></body></html>")
+			b.WriteString("<script>alert('Shows loaded successfully!');</script>")
 			body = b.String()
 		}
 	} else {
